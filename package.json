@@ -10,7 +10,7 @@
   "keywords": ["dsh-plugin"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lsz-asd/dsh-chameleon.git"
+    "url": "git+https://github.com/lsz-asd/dsh-plugin-session-delete.git"
   },
   "files": [
     "src/",
