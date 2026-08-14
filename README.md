@@ -1,5 +1,7 @@
 # dsh-plugin-session-delete
 
+你是否困扰于 web 端无法删除会话？是否觉得废弃的对话、误操作的对话看着不顺眼？是否在尝试编辑 harness 时遇到会话历史无法同步，而损坏的会话又无法删除？这个插件可以帮你！
+
 **在 DeepSeek Harness 界面里安全删除会话。** 在会话顶部添加垃圾桶按钮，侧栏会话行 "..." 菜单内添加"删除会话"项，点击后出现风险确认弹窗（需勾选）；确认后会删除会话日志、投影缓存与工作区记账；运行中的会话会有提示，若仍选择删除会停止运行并删除。可在web中使用，并且理论上兼容一切web套壳的客户端。
 **添加agent工具让agent可以删除会话。** 工具名`workbench_session_delete`
 
@@ -23,3 +25,33 @@ dsh plugin --profile <profile> add file:C:/path/to/workbench-session-delete
 
 - 添加更多针对会话的操作工具和选项
 - 将已有的针对会话的选项做成工具提供给agent
+
+---
+
+# dsh-plugin-session-delete
+
+Frustrated that sessions can't be deleted from the web client? Bothered by abandoned or mistyped conversations cluttering your sidebar? Ever tried editing your harness only to find the session history out of sync — with a corrupted session that just won't go away? This plugin has your back!
+
+**Safely delete sessions from the DeepSeek Harness UI.** Adds a trash button at the top of the conversation and a "Delete session" item to the sidebar session-row "..." menu; clicking either opens a risk-consent dialog (checkbox required). On confirm, the session log, projection cache and workspace accounting are removed. Running sessions show a warning — if you still choose to delete, the session is stopped and then deleted. Works in the web, and is theoretically compatible with any web-shell-based client.
+**Also adds an agent tool so agents can delete sessions.** Tool name: `workbench_session_delete`
+
+## Installation
+
+```sh
+dsh plugin --profile <profile> add file:C:/path/to/workbench-session-delete
+```
+
+Restart the profile to apply.
+
+## Features
+
+- Trash button at the top of the conversation
+- "Delete session" item injected into the sidebar session-row "..." menu
+- `RiskConfirmation` risk-consent dialog: confirm is only enabled after ticking "I understand the consequences"
+- Delete chain: session log + projection cache + workspace accounting (through the active storageDomain, so in-memory state and on-disk units stay consistent)
+- `workbench_session_delete` tool: agents can delete sessions directly
+
+## Roadmap
+
+- Add more session-operation tools and options
+- Expose the existing session options to agents as tools
