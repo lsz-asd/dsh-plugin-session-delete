@@ -8,7 +8,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile <profile> add file:C:/path/to/workbench-session-delete
+dsh plugin --profile <profile> add file:C:/path/to/dsh-plugin-session-delete
 ```
 
 重启 profile 生效。
@@ -38,7 +38,7 @@ Frustrated that sessions can't be deleted from the web client? Bothered by aband
 ## Installation
 
 ```sh
-dsh plugin --profile <profile> add file:C:/path/to/workbench-session-delete
+dsh plugin --profile <profile> add file:C:/path/to/dsh-plugin-session-delete
 ```
 
 Restart the profile to apply.
