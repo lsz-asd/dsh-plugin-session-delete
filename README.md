@@ -28,6 +28,10 @@ dsh plugin --profile <profile> add file:C:/path/to/dsh-plugin-session-delete
 - 
 <img width="1800" height="1020" alt="image" src="https://github.com/user-attachments/assets/c66f6185-457d-4261-9e10-1b44b9959896" />
 
+## 更新日志
+
+- **v0.3.0（2026-08-14）**：新增英文适配（i18n）。删除对话框、头部垃圾桶按钮与侧栏「删除会话」菜单项的全部文案接入客户端 zh/en 字典，跟随界面语言（设置中的语言或浏览器语言）自动切换并即时生效；未加载 locale 服务的环境会按浏览器语言回退到内置中英文字典。
+
 ---
 
 # dsh-plugin-session-delete
@@ -57,3 +61,7 @@ Restart the profile to apply.
 
 - Add more session-operation tools and options
 - Expose the existing session options to agents as tools
+
+## Changelog
+
+- **v0.3.0 (2026-08-14)**: Added English adaptation (i18n). All copy of the delete dialog, the header trash button and the sidebar "Delete session" menu item now lives in client zh/en dictionaries and follows the UI language (the language setting or the browser language), updating live on switch; environments without the locale service fall back to the built-in dictionaries by browser language.
