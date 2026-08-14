@@ -1,0 +1,6 @@
+# dsh-plugin-session-delete bundle layer: inserts the session-delete plugin row.
+# Loaded via `dsh plugin --profile <name> add` — the row id stays stable so
+# re-adds and profile patches can target it.
+- insert:
+    - id: chameleon-session-delete
+      name: '@huanlin/dsh-plugin-session-delete'
