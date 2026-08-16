@@ -10,7 +10,7 @@
 //   1. refuse while a live agent owns the session (ctx.agents.get(id));
 //   2. flush a live session so dispose-time teardown has no pending writes;
 //   3. remove the persisted log dir  ~/.dsh/sessions/<slug>/<id>/ for both id
-//      spellings (raw uuid and `session-` prefixed);
+//      spellings (raw and `session-` prefixed);
 //   4. drop the projection-cache row (storageDomain 'session_projcache',
 //      table 'sessions');
 //   5. only after the log is confirmed gone, remove the workspace accounting
@@ -25,12 +25,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { isValidSessionId, sessionIdVariants } from './session-id.js'
 
 const name = 'chameleon-session-delete'
 // Only `tools` is a hard dependency; webServer is optional (see apply).
 const inject = ['tools']
-
-const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 class DeleteError extends Error {
   constructor(message, status) {
@@ -47,20 +46,6 @@ function dshHome() {
 
 function sessionsRoot() {
   return path.join(dshHome(), 'sessions')
-}
-
-// Session ids may appear in two spellings in different stores: the raw id
-// (`<uuid>`) and the prefixed form (`session-<uuid>`).  The on-disk JSONL
-// backend encodes the exact session id, while older/workspace/projcache rows
-// can carry either spelling.  Return every unique spelling we should clean up.
-function sessionIdVariants(sessionId) {
-  const variants = new Set([sessionId])
-  if (sessionId.startsWith('session-')) {
-    variants.add(sessionId.slice('session-'.length))
-  } else if (SESSION_ID_RE.test(sessionId)) {
-    variants.add(`session-${sessionId}`)
-  }
-  return [...variants]
 }
 
 // Locate ~/.dsh/sessions/<slug>/<sessionId>/ by scanning every slug dir, so
@@ -231,7 +216,7 @@ function detachLiveSession(ctx, sessionId) {
 }
 
 async function deleteSessionCore(ctx, sessionId) {
-  if (!SESSION_ID_RE.test(sessionId)) {
+  if (!isValidSessionId(sessionId)) {
     throw new DeleteError(`invalid session id: ${sessionId}`, 400)
   }
   const stopped = await stopAgentIfRunning(ctx, sessionId)
@@ -397,7 +382,7 @@ function apply(ctx) {
       sessionId: {
         type: 'string',
         required: true,
-        description: 'The session id to delete (uuid or session-<uuid> form).',
+        description: 'The session id to delete (uuid, session-<uuid>, custom id, or session-<custom id>).',
       },
     },
     output: {

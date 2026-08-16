@@ -19,6 +19,9 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
