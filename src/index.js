@@ -28,6 +28,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { isValidSessionId, sessionIdVariants } from './session-id.js'
+import { parseJsonObjectBody } from './http-args.js'
 
 const name = 'chameleon-session-delete'
 // Only `tools` is a hard dependency; webServer is optional (see apply).
@@ -349,8 +350,7 @@ function apply(ctx) {
         }
         let args = {}
         try {
-          const body = await readBody(req)
-          if (body) args = JSON.parse(body)
+          args = parseJsonObjectBody(await readBody(req))
         } catch {
           sendJson(res, 400, { error: 'bad json body' })
           return

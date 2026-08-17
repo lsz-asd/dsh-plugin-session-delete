@@ -11,9 +11,17 @@
 //
 // The slug rule requires an alphanumeric first character, so a bare `.` or
 // `..` (or a `session-` prefixed `.`/`..`) is rejected before it can become a
-// parent-directory reference.
+// parent-directory reference. It also rejects a trailing `.` (invalid or
+// normalized away on Windows, where `a.` would target the dir `a`) and Windows
+// reserved device names (CON/PRN/AUX/NUL/COMn/LPTn), which cannot be used as
+// directory names there.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+// Conservative slug: alphanumeric first char, then [A-Za-z0-9._-], and the LAST
+// char must be alphanumeric, `_` or `-` (never a dot). Length 1..128.
+const SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9_-])?$/
+// Windows reserved device names, case-insensitive, with or without a trailing
+// extension (e.g. `NUL`, `con.txt`, `COM1.foo`).
+const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i
 const PREFIX = 'session-'
 
 export function isValidSessionId(sessionId) {
@@ -26,6 +34,9 @@ export function isValidSessionId(sessionId) {
   if (raw === '' || raw === '.' || raw === '..') {
     return false
   }
+  if (WINDOWS_RESERVED_RE.test(raw)) {
+    return false
+  }
   return UUID_RE.test(raw) || SLUG_RE.test(raw)
 }
 
@@ -34,6 +45,12 @@ export function isValidSessionId(sessionId) {
 // on-disk JSONL backend encodes the exact session id, while older/workspace/
 // projcache rows can carry either spelling.  Return every unique spelling we
 // should clean up.
+//
+// NOTE on the `session-` prefix ambiguity: any input starting with `session-`
+// is treated as the prefixed spelling, and its bare remainder as the alternate
+// spelling. This is correct because DSH mints canonical ids WITH the
+// `session-` prefix; a raw id that itself began with `session-` is not
+// separately supported (see test 'session-foo 歧义').
 export function sessionIdVariants(sessionId) {
   const variants = new Set([sessionId])
   if (sessionId.startsWith(PREFIX)) {
