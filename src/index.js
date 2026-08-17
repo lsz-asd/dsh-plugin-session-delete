@@ -91,7 +91,7 @@ function removeSessionDirs(sessionId) {
 // workspace accounting domain. Uses the opened domain facilities (the
 // authoritative in-memory state) so the periodic flush can never re-publish a
 // stale row.  All id spellings are cleaned because projcache/workspace rows
-// may use either the raw uuid or the `session-` prefixed form.
+// may use either the raw id or the `session-` prefixed form.
 // Domain API: storageDomain.get(name) -> domain with .table(name) (KvTable:
 // get/put/delete/entries) and .global (handle with get/set).
 async function stripStorageDomains(ctx, sessionId, { workspace = true } = {}) {
@@ -384,7 +384,7 @@ function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'workbench_session_delete',
-    description: 'Permanently delete one session of this workbench: stops the agent if it is running (cancel + quiescence), then removes its persisted log, projection-cache row and workspace accounting. After deletion the client reloads; the edit-mode caller should verify with workbench_status or the session list.',
+    description: 'Permanently delete one session of this workbench: stops the agent if it is running (cancel + quiescence), then removes its persisted log, projection-cache row and workspace accounting. After deletion the client refreshes its session list in place; the edit-mode caller should verify with workbench_status or the session list.',
     parameters: {
       sessionId: {
         type: 'string',
