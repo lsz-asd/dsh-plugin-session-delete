@@ -39,6 +39,20 @@ class DeleteError extends Error {
   }
 }
 
+class ArchiveError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.status = status
+  }
+}
+
+class RestoreError extends Error {
+  constructor(message, status) {
+    super(message)
+    this.status = status
+  }
+}
+
 // --- path helpers ------------------------------------------------------------
 
 function dshHome() {
@@ -109,6 +123,7 @@ function removeSessionDirs(sessionId) {
 async function stripStorageDomains(ctx, sessionId, { workspace = true } = {}) {
   const sd = ctx.get('storageDomain')
   if (!sd) return { projRemoved: false, workspaceRemoved: false }
+  const registry = ctx.get('workspaceRegistry')
   const variants = sessionIdVariants(sessionId)
   let projRemoved = false
   let workspaceRemoved = false
@@ -146,7 +161,14 @@ async function stripStorageDomains(ctx, sessionId, { workspace = true } = {}) {
         if (g && typeof g.get === 'function' && typeof g.set === 'function') {
           const state = g.get()
           if (state && Array.isArray(state.archivedSessionIds) && variants.some((v) => state.archivedSessionIds.includes(v))) {
-            await g.set({ ...state, archivedSessionIds: state.archivedSessionIds.filter((x) => !variants.includes(x)) })
+            // The registry operation queue owns archive-set mutations on current
+            // DSH versions. The legacy direct write remains for old runtimes.
+            if (!registry
+              || typeof registry.enqueueOperation !== 'function'
+              || typeof registry.requireState !== 'function'
+              || typeof registry.setState !== 'function') {
+              await g.set({ ...state, archivedSessionIds: state.archivedSessionIds.filter((x) => !variants.includes(x)) })
+            }
             workspaceRemoved = true
           }
         }
@@ -258,10 +280,11 @@ async function deleteSessionCore(ctx, sessionId) {
 
   // Only after the log is confirmed gone do we detach the session from its
   // workspace/archive accounting.
+  const archiveStorage = await removeArchivedSessionCore(ctx, sessionId)
   const workspaceStorage = await stripStorageDomains(ctx, sessionId, { workspace: true })
   const dirRemoved = firstDirRemoved || secondDirRemoved || thirdDirRemoved
   const projRemoved = projStorage.projRemoved || workspaceStorage.projRemoved
-  const workspaceRemoved = workspaceStorage.workspaceRemoved
+  const workspaceRemoved = workspaceStorage.workspaceRemoved || archiveStorage.changed
   if (!dirRemoved && !projRemoved && !workspaceRemoved) {
     throw new DeleteError(`session not found: ${sessionId}`, 404)
   }
@@ -276,14 +299,18 @@ async function deleteSessionCore(ctx, sessionId) {
 // delete dialog for the right session WITHOUT switching to it.
 async function listSessions(ctx) {
   const agents = ctx.get('agents')
+  const archivedIds = readArchivedSessionIds(ctx)
+  const archived = new Set(archivedIds)
   const sd = ctx.get('storageDomain')
   const out = []
+  const seen = new Set()
   if (!sd) return out
   const proj = sd.get('session_projcache')
   if (!proj || typeof proj.table !== 'function') return out
   try {
     const sessions = proj.table('sessions')
     for (const [id, rec] of sessions.entries()) {
+      seen.add(id)
       if (!rec || typeof rec !== 'object') continue
       const rows = rec.rows && typeof rec.rows === 'object' ? rec.rows : {}
       const titleRow = rows.title && rows.title.val
@@ -293,10 +320,148 @@ async function listSessions(ctx) {
         title: typeof titleRow === 'string' ? titleRow : null,
         createdAt: typeof identity.createdAt === 'number' ? identity.createdAt : null,
         running: !!(agents && typeof agents.get === 'function' && agents.get(id)),
+        archived: archived.has(id),
       })
     }
   } catch { /* unit closed or table absent */ }
+  // A session can remain in the archive set even when its projection row is
+  // unavailable. Keep it manageable rather than silently losing the entry.
+  for (const id of archivedIds) {
+    if (seen.has(id)) continue
+    out.push({
+      sessionId: id,
+      title: null,
+      createdAt: null,
+      running: !!(agents && typeof agents.get === 'function' && agents.get(id)),
+      archived: true,
+    })
+  }
   return out
+}
+
+// --- archive ------------------------------------------------------------------
+// Use the WorkspaceRegistry's official archive operation. It writes the
+// registry-global archive set and emits the normal host frame, while retaining
+// the session log and its workspace slot for a future restore implementation.
+function normalizeArchiveSessionId(value) {
+  const sessionId = String(value || '').trim()
+  if (!sessionId) throw new ArchiveError('sessionId required', 400)
+  if (sessionId.length > 512) throw new ArchiveError('sessionId is too long', 400)
+  return sessionId
+}
+
+function readArchivedSessionIds(ctx) {
+  const registry = ctx.get('workspaceRegistry')
+  try {
+    if (registry && Array.isArray(registry.archivedSessionIds)) {
+      return [...registry.archivedSessionIds]
+    }
+  } catch { /* registry may still be starting */ }
+  return []
+}
+
+// Restore/remove are not exposed by the current public WorkspaceRegistry API.
+// Serialize the mutation through its operation queue so the registry cache,
+// durable global state, and host stream all observe one ordered commit.
+async function mutateArchiveSet(ctx, sessionId, operation) {
+  const registry = ctx.get('workspaceRegistry')
+  if (registry
+    && typeof registry.enqueueOperation === 'function'
+    && typeof registry.requireState === 'function'
+    && typeof registry.setState === 'function') {
+    return registry.enqueueOperation(async () => {
+      const state = registry.requireState()
+      const ids = Array.isArray(state.archivedSessionIds) ? state.archivedSessionIds : []
+      const present = ids.includes(sessionId)
+      if (!present) return { changed: false, archived: false }
+      const archivedSessionIds = ids.filter((id) => id !== sessionId)
+      await registry.setState({ ...state, archivedSessionIds })
+      return { changed: true, archived: operation !== 'restore' }
+    })
+  }
+
+  // Compatibility fallback for older workspace implementations: mutate the
+  // opened domain global directly and refresh the registry cache when possible.
+  const sd = ctx.get('storageDomain')
+  const workspace = sd && typeof sd.get === 'function' ? sd.get('workspace') : undefined
+  const global = workspace && workspace.global
+  if (!global || typeof global.get !== 'function' || typeof global.set !== 'function') {
+    if (operation === 'restore') throw new RestoreError('workspace archive state is unavailable', 503)
+    return { changed: false, archived: false }
+  }
+  const state = global.get()
+  const ids = state && Array.isArray(state.archivedSessionIds) ? state.archivedSessionIds : []
+  if (!ids.includes(sessionId)) return { changed: false, archived: false }
+  const next = { ...state, archivedSessionIds: ids.filter((id) => id !== sessionId) }
+  await global.set(next)
+  try { if (registry) registry.state = next } catch { /* cache is best effort on old runtimes */ }
+  return { changed: true, archived: operation !== 'restore' }
+}
+
+async function restoreSessionCore(ctx, rawSessionId) {
+  const sessionId = normalizeArchiveSessionId(rawSessionId)
+  const registry = ctx.get('workspaceRegistry')
+  if (registry && typeof registry.sessionKnown === 'function') {
+    try {
+      if (!await registry.sessionKnown(sessionId)) {
+        throw new RestoreError('session is no longer available: ' + sessionId, 404)
+      }
+    } catch (e) {
+      if (e instanceof RestoreError) throw e
+      throw e
+    }
+  }
+  const result = await mutateArchiveSet(ctx, sessionId, 'restore')
+  if (!result.changed) throw new RestoreError('session is not archived: ' + sessionId, 404)
+  return {
+    sessionId,
+    restored: true,
+    archivedSessionIds: readArchivedSessionIds(ctx),
+  }
+}
+
+async function removeArchivedSessionCore(ctx, sessionId) {
+  return mutateArchiveSet(ctx, sessionId, 'remove')
+}
+
+async function archiveSessionCore(ctx, rawSessionId) {
+  const sessionId = normalizeArchiveSessionId(rawSessionId)
+  const registry = ctx.get('workspaceRegistry')
+  if (!registry || typeof registry.archiveSession !== 'function') {
+    throw new ArchiveError('workspace archive service is unavailable', 503)
+  }
+
+  let alreadyArchived = false
+  try {
+    alreadyArchived = Array.isArray(registry.archivedSessionIds)
+      && registry.archivedSessionIds.includes(sessionId)
+  } catch { /* registry is still starting: let the official call report it */ }
+
+  try {
+    await registry.archiveSession(sessionId)
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e)
+    if (e && (e.name === 'WorkspaceUnknownSessionError' || e.sessionId === sessionId)
+      || /cannot archive session|unknown session|session.*not found/i.test(message)) {
+      throw new ArchiveError(message, 404)
+    }
+    throw e
+  }
+
+  let archivedSessionIds = [sessionId]
+  try {
+    if (Array.isArray(registry.archivedSessionIds)) {
+      archivedSessionIds = [...registry.archivedSessionIds]
+    }
+  } catch { /* return the requested id if the getter is temporarily unavailable */ }
+  const agents = ctx.get('agents')
+  return {
+    sessionId,
+    archived: true,
+    alreadyArchived,
+    running: !!(agents && typeof agents.get === 'function' && agents.get(sessionId)),
+    archivedSessionIds,
+  }
 }
 
 // --- http helpers -------------------------------------------------------------
@@ -349,6 +514,26 @@ function apply(ctx) {
 
     targetCtx.effect(() => host.register({
       kind: 'exact',
+      path: '/__chameleon/session/archive/list',
+      handler: async (req, res) => {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        try {
+          const sessions = await listSessions(ctx)
+          sendJson(res, 200, {
+            ok: true,
+            sessions: sessions.filter((session) => session.archived),
+          })
+        } catch (e) {
+          sendJson(res, 500, { error: e.message })
+        }
+      },
+    }))
+
+    targetCtx.effect(() => host.register({
+      kind: 'exact',
       path: '/__chameleon/session/delete',
       handler: async (req, res) => {
         if (req.method !== 'POST') {
@@ -373,6 +558,58 @@ function apply(ctx) {
           sendJson(res, 200, { ok: true, removed: [sessionId], ...result })
         } catch (e) {
           const status = e instanceof DeleteError && e.status ? e.status : 500
+          sendJson(res, status, { error: e.message })
+        }
+      },
+    }))
+
+    targetCtx.effect(() => host.register({
+      kind: 'exact',
+      path: '/__chameleon/session/archive',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        let args = {}
+        try {
+          const body = await readBody(req)
+          if (body) args = JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { error: 'bad json body' })
+          return
+        }
+        try {
+          const result = await archiveSessionCore(ctx, args.sessionId)
+          sendJson(res, 200, { ok: true, ...result })
+        } catch (e) {
+          const status = e instanceof ArchiveError && e.status ? e.status : 500
+          sendJson(res, status, { error: e.message })
+        }
+      },
+    }))
+
+    targetCtx.effect(() => host.register({
+      kind: 'exact',
+      path: '/__chameleon/session/archive/restore',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        let args = {}
+        try {
+          const body = await readBody(req)
+          if (body) args = JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { error: 'bad json body' })
+          return
+        }
+        try {
+          const result = await restoreSessionCore(ctx, args.sessionId)
+          sendJson(res, 200, { ok: true, ...result })
+        } catch (e) {
+          const status = e instanceof RestoreError && e.status ? e.status : 500
           sendJson(res, status, { error: e.message })
         }
       },
@@ -416,6 +653,62 @@ function apply(ctx) {
         ].join('\n')
       } catch (e) {
         return `delete failed: ${e.message}`
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'workbench_session_archive',
+    description: 'Archive one session without deleting its log, messages, statistics or workspace accounting. Uses the official workspace archive set; the session disappears from the sidebar and remains recoverable by a future restore operation.',
+    parameters: {
+      sessionId: {
+        type: 'string',
+        required: true,
+        description: 'The opaque session id to archive.',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render(_args, value) { return [{ type: 'text', text: value }] },
+    },
+    async execute(args) {
+      try {
+        const result = await archiveSessionCore(ctx, args.sessionId)
+        return [
+          `archived: ${result.sessionId}`,
+          `already archived: ${result.alreadyArchived}`,
+          `running task continues: ${result.running}`,
+          'session log and workspace accounting retained: true',
+        ].join('\n')
+      } catch (e) {
+        return `archive failed: ${e.message}`
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'workbench_session_restore',
+    description: 'Restore one archived session to the normal session list. Keeps its log, statistics and workspace accounting unchanged; the session returns to its previous workspace position.',
+    parameters: {
+      sessionId: {
+        type: 'string',
+        required: true,
+        description: 'The opaque archived session id to restore.',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render(_args, value) { return [{ type: 'text', text: value }] },
+    },
+    async execute(args) {
+      try {
+        const result = await restoreSessionCore(ctx, args.sessionId)
+        return [
+          `restored: ${result.sessionId}`,
+          'session log and workspace accounting retained: true',
+        ].join('\n')
+      } catch (e) {
+        return `restore failed: ${e.message}`
       }
     },
   }))

@@ -1,8 +1,11 @@
 {
   "name": "@huanlin/dsh-plugin-session-delete",
-  "version": "0.3.1",
-  "description": "Delete sessions of a DeepSeek Harness profile from the UI: header danger button + session-row menu item with a risk-consent dialog; host endpoint + tool delete the log, projection cache and workspace accounting. Works in web and the desktop client alike.",
+  "version": "0.5.0",
+  "description": "Manage archived DeepSeek Harness sessions from a sidebar archive manager: list, restore, or permanently delete them, alongside confirmed archive and danger actions. Works in web and the desktop client alike.",
   "type": "module",
+  "scripts": {
+    "build": "bash scripts/build.sh"
+  },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -13,16 +16,17 @@
     "url": "git+https://github.com/lsz-asd/dsh-plugin-session-delete.git"
   },
   "files": [
-    "src/",
-    "cordis.patch.yml"
+    "lib/",
+    "cordis.patch.yml",
+    "README.md"
   ],
   "engines": {
     "node": ">=20"
   },
-  "main": "src/index.js",
+  "main": "lib/index.js",
   "exports": {
-    ".": "./src/index.js",
-    "./client": "./src/client.js",
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
