@@ -47,14 +47,21 @@ window.__ModuleLoader__.load({
       'dialog.confirm': '删除',
       'dialog.confirming': '删除中…',
       'dialog.deleting': '正在删除…',
+      'dialog.done': '完成',
+      'dialog.doneTitle': '会话已删除',
       'dialog.untitled': '未命名会话',
       'dialog.session': '会话：',
       'dialog.sessionId': '序列号：',
       'dialog.runningWarn': '⚠ 会话正在运行',
       'dialog.ack': '我已了解后果，确认删除',
       'dialog.notFoundDesc': '未能在会话列表中找到该会话（可能已被删除或列表尚未刷新），请刷新后重试。',
-      'dialog.runningDesc': '该会话正在运行，删除会立即停止其任务并永久删除，正在进行的操作将中断且无法恢复。',
-      'dialog.deleteDesc': '将永久删除该会话及其全部对话记录（会话日志、统计与工作区记账），此操作不可恢复。',
+      'dialog.runningDesc': '该会话正在运行，删除会立即停止其任务并永久删除，正在进行的操作将中断且无法恢复。删除将同时清理该会话期间新产生的所有文件：会话上传目录与工作区内会话新建的文件（会话修改过的既有文件会保留）。',
+      'dialog.deleteDesc': '将永久删除该会话及其全部对话记录（会话日志、统计与工作区记账），并自动删除该会话期间新产生的所有文件：会话上传目录（.dsh-uploads/<会话ID>）与工作区内会话新建的文件；会话修改过的既有文件会保留。此操作不可恢复。',
+      'dialog.summary.removed': '已删除会话期间新产生的文件 {0} 个（共 {1}）',
+      'dialog.summary.uploads': '已清理会话上传目录 {0} 个',
+      'dialog.summary.kept': '会话修改过的既有文件已保留 {0} 个',
+      'dialog.summary.failed': '{0} 个文件删除失败（运行中的程序可能占用）',
+      'dialog.summary.none': '该会话没有产生需要清理的文件',
       'button.title': '删除会话',
       'button.titleRunning': '删除会话（运行中，删除将停止任务）',
       'menu.delete': '删除会话',
@@ -66,14 +73,21 @@ window.__ModuleLoader__.load({
       'dialog.confirm': 'Delete',
       'dialog.confirming': 'Deleting…',
       'dialog.deleting': 'Deleting…',
+      'dialog.done': 'Done',
+      'dialog.doneTitle': 'Session deleted',
       'dialog.untitled': 'Untitled session',
       'dialog.session': 'Session: ',
       'dialog.sessionId': 'Session ID: ',
       'dialog.runningWarn': '⚠ Session is running',
       'dialog.ack': 'I understand the consequences. Confirm deletion',
       'dialog.notFoundDesc': 'Could not find this session in the session list (it may have been deleted or the list has not refreshed yet). Please refresh and try again.',
-      'dialog.runningDesc': 'This session is running. Deleting it will stop its task immediately and remove it permanently; any work in progress will be interrupted and cannot be recovered.',
-      'dialog.deleteDesc': 'This will permanently delete the session and all of its conversation records (session log, statistics and workspace accounting). This action cannot be undone.',
+      'dialog.runningDesc': 'This session is running. Deleting it will stop its task immediately and remove it permanently; any work in progress will be interrupted and cannot be recovered. All files newly produced during the session are removed as well: the session upload directory and files the session created in the workspace (pre-existing files the session modified are kept).',
+      'dialog.deleteDesc': 'This will permanently delete the session and all of its conversation records (session log, statistics and workspace accounting), and automatically remove all files newly produced during the session: the session upload directory (.dsh-uploads/<sessionId>) and files the session created in the workspace; pre-existing files the session modified are kept. This action cannot be undone.',
+      'dialog.summary.removed': 'Removed {0} file(s) created during the session ({1} in total)',
+      'dialog.summary.uploads': 'Removed {0} session upload directory (directories)',
+      'dialog.summary.kept': 'Kept {0} pre-existing file(s) that the session modified',
+      'dialog.summary.failed': '{0} file(s) could not be removed (possibly locked by a running program)',
+      'dialog.summary.none': 'No session-produced files needed cleaning up',
       'button.title': 'Delete session',
       'button.titleRunning': 'Delete session (running — deleting will stop the task)',
       'menu.delete': 'Delete session',
@@ -252,6 +266,48 @@ window.__ModuleLoader__.load({
       return null
     }
 
+    // Human-readable byte formatting for the delete summary.
+    function fmtBytes(n) {
+      n = Number(n) || 0
+      if (n < 1024) return n + ' B'
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+      return (n / (1024 * 1024)).toFixed(1) + ' MB'
+    }
+
+    // Format one `{0}`-placeheld copy string.
+    function fmt(tpl) {
+      for (let i = 1; i < arguments.length; i++) {
+        tpl = tpl.replace('{' + (i - 1) + '}', String(arguments[i]))
+      }
+      return tpl
+    }
+
+    // Render the post-delete summary lines (host `files` report).
+    function renderSummaryBlocks(files, t) {
+      const blocks = []
+      if (!files || files.removed + files.uploadDirsRemoved + files.failed === 0) {
+        blocks.push(React.createElement('div', { key: 'none', style: statusStyle }, t('dialog.summary.none')))
+        return blocks
+      }
+      if (files.removed > 0) {
+        blocks.push(React.createElement('div', { key: 'removed', style: statusStyle },
+          fmt(t('dialog.summary.removed'), files.removed, fmtBytes(files.bytes || 0))))
+      }
+      if (files.uploadDirsRemoved > 0) {
+        blocks.push(React.createElement('div', { key: 'uploads', style: statusStyle },
+          fmt(t('dialog.summary.uploads'), files.uploadDirsRemoved)))
+      }
+      if (files.failed > 0) {
+        blocks.push(React.createElement('div', { key: 'failed', style: { ...errStyle, marginTop: 4 } },
+          fmt(t('dialog.summary.failed'), files.failed)))
+      }
+      if (files.modifiedCount > 0) {
+        blocks.push(React.createElement('div', { key: 'kept', style: { ...statusStyle, marginTop: 4 } },
+          fmt(t('dialog.summary.kept'), files.modifiedCount)))
+      }
+      return blocks
+    }
+
     function DeleteSessionDialog(props) {
       const t = (props && props.t) || __t
       useLocaleRevision()
@@ -332,14 +388,16 @@ window.__ModuleLoader__.load({
             if (!res.ok || !data.ok) {
               throw new Error(data.error || `delete failed (HTTP ${res.status})`)
             }
-            // Deleted. Refresh the sidebar list in place — NO page reload —
-            // and if the current session was deleted, open the first
-            // remaining session so the user can keep working.
+            // Deleted. Switch to the done screen (shows what was cleaned
+            // up), refresh the sidebar list in place — NO page reload — and
+            // if the current session was deleted, open the first remaining
+            // session so the user can keep working.
             const svc = __sessionsSvc
             const deletedCurrent = svc && svc.list
               ? svc.list.getSnapshot().current === target.sessionId
               : false
-            setTarget(null)
+            setTarget((prev) => (prev ? { ...prev, done: data.files || null } : prev))
+            setBusy(false)
             if (svc && typeof svc.refreshList === 'function') {
               const done = svc.refreshList()
               if (deletedCurrent) {
@@ -361,12 +419,43 @@ window.__ModuleLoader__.load({
 
       if (!target) return null
 
+      const done = target.done !== undefined
       const name = target.notFound ? target.title || t('dialog.untitled') : (target.title || t('dialog.untitled'))
-      const description = target.notFound
-        ? t('dialog.notFoundDesc')
-        : target.running
-          ? t('dialog.runningDesc')
-          : t('dialog.deleteDesc')
+      const description = done
+        ? null
+        : target.notFound
+          ? t('dialog.notFoundDesc')
+          : target.running
+            ? t('dialog.runningDesc')
+            : t('dialog.deleteDesc')
+
+      // Done screen: report what was cleaned, one close button.
+      if (done) {
+        return React.createElement(Modal, {
+          open: true,
+          onClose: () => setTarget(null),
+          title: t('dialog.doneTitle'),
+          closeLabel: t('dialog.done'),
+          description: null,
+          footer: [
+            React.createElement('button', {
+              key: 'done',
+              type: 'button',
+              onClick: () => setTarget(null),
+              style: dangerBtnStyle,
+            }, t('dialog.done')),
+          ],
+        }, [
+          React.createElement('div', { key: 'meta', style: metaStyle },
+            t('dialog.session'), name,
+            target.sessionId
+              ? React.createElement(React.Fragment, null,
+                  React.createElement('br'),
+                  t('dialog.sessionId'), target.sessionId)
+              : null),
+          renderSummaryBlocks(target.done, t),
+        ])
+      }
 
       return React.createElement(Modal, {
         open: true,

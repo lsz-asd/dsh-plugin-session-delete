@@ -13,7 +13,11 @@
 //      spellings (raw uuid and `session-` prefixed);
 //   4. drop the projection-cache row (storageDomain 'session_projcache',
 //      table 'sessions');
-//   5. only after the log is confirmed gone, remove the workspace accounting
+//   5. auto-delete the files the session newly produced — its upload dir
+//      (<cwd>/.dsh-uploads/<sessionId>/) plus workspace files created after
+//      the session baseline ledger snapshot (birth-time fallback when no
+//      ledger exists); pre-existing files the session modified are kept;
+//   6. only after the log is confirmed gone, remove the workspace accounting
 //      (domain 'workspace': sessionIds arrays + global.archivedSessionIds).
 //
 // The client reloads after a successful delete, so the fresh session list is
@@ -25,6 +29,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import {
+  cleanupSessionWorkspaces,
+  readLedger,
+  snapshotWorkspace,
+  writeLedger,
+} from './session-files.js'
 
 const name = 'chameleon-session-delete'
 // Only `tools` is a hard dependency; webServer is optional (see apply).
@@ -95,6 +105,88 @@ function removeSessionDirs(sessionId) {
     fs.rmSync(dir, { recursive: true, force: true })
   }
   return dirs.length > 0
+}
+
+// --- per-session file artifacts ----------------------------------------------
+// "Files newly produced in the session" (uploads + workspace files created
+// during the session) are cleaned by src/session-files.js. The host half is
+// responsible for three things:
+//   1. snapshotting the session workspace at `session/created` into a
+//      baseline ledger (under <DSH_HOME>/plugin-data/chameleon-session-delete);
+//   2. resolving, at delete time, every workspace path the session is
+//      accounted in, plus the session creation time;
+//   3. running the cleanup and reporting its outcome.
+
+// Every workspace entity the session is accounted in (workspace domain
+// records list sessionIds in display order). Returns unique absolute paths.
+async function findSessionWorkspaces(ctx, sessionId) {
+  const sd = ctx.get('storageDomain')
+  if (!sd || typeof sd.get !== 'function') return []
+  const ws = sd.get('workspace')
+  if (!ws || typeof ws.table !== 'function') return []
+  const variants = sessionIdVariants(sessionId)
+  const out = []
+  try {
+    const workspaces = ws.table('workspaces')
+    for (const [, rec] of workspaces.entries()) {
+      if (!rec || typeof rec.path !== 'string') continue
+      if (Array.isArray(rec.sessionIds) && variants.some((v) => rec.sessionIds.includes(v))) {
+        if (!out.includes(rec.path)) out.push(rec.path)
+      }
+    }
+  } catch { /* unit closed or table absent */ }
+  return out
+}
+
+// The session creation time (ms) from the projection-cache identity, looked
+// up BEFORE the projection rows are stripped.
+function readProjectionCreatedAt(ctx, sessionId) {
+  const sd = ctx.get('storageDomain')
+  if (!sd || typeof sd.get !== 'function') return null
+  const proj = sd.get('session_projcache')
+  if (!proj || typeof proj.table !== 'function') return null
+  try {
+    const sessions = proj.table('sessions')
+    for (const variant of sessionIdVariants(sessionId)) {
+      const rec = sessions.get(variant)
+      if (rec && rec.identity && typeof rec.identity.createdAt === 'number') {
+        return rec.identity.createdAt
+      }
+    }
+  } catch { /* unit closed or table absent */ }
+  return null
+}
+
+// Snapshot the workspace of a newly created session into its baseline
+// ledger, so deletion can later tell session-produced files apart from
+// pre-existing ones. Background, fail-soft: a missing ledger merely falls
+// back to birth-time heuristics at delete time. An existing ledger is never
+// overwritten (re-announcing a session must not absorb its file history).
+async function snapshotSessionArtifacts(ctx, session) {
+  const sessionId = session && (session.id || (session.header && session.header.id))
+  if (!sessionId || !SESSION_ID_RE.test(String(sessionId))) return
+  const header = session.header
+  if (!header || typeof header.cwd !== 'string') return
+  const createdAt = typeof header.createdAt === 'number' ? header.createdAt : Date.now()
+  if (readLedger(sessionId)) return
+  try {
+    const canonical = fs.realpathSync(header.cwd)
+    if (!fs.statSync(canonical).isDirectory()) return
+    // Derived sessions (subagents, forks) share the parent's workspace:
+    // their writes are attributed to the parent's baseline, and deleting
+    // them must NOT scan the shared workspace (files the parent created
+    // after the fork would be misattributed). Record a derived marker —
+    // on delete, only the session upload dir is cleaned.
+    if (header.origin === 'subagent' || header.parentSession !== undefined) {
+      await writeLedger(sessionId, { workspacePath: canonical, createdAt, derived: true }, null)
+      return
+    }
+    const snap = await snapshotWorkspace(canonical)
+    if (snap.truncated) return // too big: no baseline, fallback path applies
+    await writeLedger(sessionId, { workspacePath: canonical, createdAt }, snap)
+    ctx.logger && ctx.logger.debug && ctx.logger.debug(
+      `session-delete: snapshotted workspace for ${sessionId} (${snap.entries.size} entries)`)
+  } catch { /* workspace missing or snapshot failed: fallback at delete time */ }
 }
 
 // --- live storage mutation (memory + disk stay consistent) -------------------
@@ -238,6 +330,10 @@ async function deleteSessionCore(ctx, sessionId) {
   await flushSessionIfLive(ctx, sessionId)
   const detached = detachLiveSession(ctx, sessionId)
 
+  // Snapshot the session creation time BEFORE the projection rows are
+  // stripped below (it powers the birth-time fallback for file cleanup).
+  const createdAt = readProjectionCreatedAt(ctx, sessionId)
+
   // Remove every on-disk log directory first.  If the filesystem refuses, fail
   // before touching workspace accounting so a half-deleted session cannot fall
   // out of its group into "Ungrouped".
@@ -256,16 +352,38 @@ async function deleteSessionCore(ctx, sessionId) {
     throw new DeleteError(`session files could not be fully removed: ${remainingDirs.join(', ')}`, 500)
   }
 
+  // Auto-delete the files the session produced: its upload dirs
+  // (<cwd>/.dsh-uploads/<sessionId>/) always; workspace files created during
+  // the session per the baseline ledger (or birth-time fallback). Best-effort
+  // by design: a locked file must not block the session deletion, and every
+  // failure is reported in the result.
+  const ledger = readLedger(sessionId)
+  const wsPaths = await findSessionWorkspaces(ctx, sessionId)
+  const targetSet = new Set()
+  for (const p of wsPaths) targetSet.add(path.resolve(p))
+  if (ledger && ledger.workspacePath) targetSet.add(path.resolve(ledger.workspacePath))
+  const variants = sessionIdVariants(sessionId)
+  const targets = []
+  for (const wsPath of targetSet) {
+    targets.push({
+      workspacePath: wsPath,
+      ledger: ledger && path.resolve(ledger.workspacePath) === wsPath ? ledger : null,
+      uploadDirs: variants.map((v) => path.join(wsPath, '.dsh-uploads', v)),
+    })
+  }
+  const files = await cleanupSessionWorkspaces({ sessionId, targets, createdAt })
+
   // Only after the log is confirmed gone do we detach the session from its
   // workspace/archive accounting.
   const workspaceStorage = await stripStorageDomains(ctx, sessionId, { workspace: true })
   const dirRemoved = firstDirRemoved || secondDirRemoved || thirdDirRemoved
   const projRemoved = projStorage.projRemoved || workspaceStorage.projRemoved
   const workspaceRemoved = workspaceStorage.workspaceRemoved
-  if (!dirRemoved && !projRemoved && !workspaceRemoved) {
+  if (!dirRemoved && !projRemoved && !workspaceRemoved &&
+      files.removed === 0 && files.uploadDirsRemoved === 0 && files.failed === 0) {
     throw new DeleteError(`session not found: ${sessionId}`, 404)
   }
-  return { stopped, detached, dirRemoved, projRemoved, workspaceRemoved }
+  return { stopped, detached, dirRemoved, projRemoved, workspaceRemoved, files }
 }
 
 // --- session list (for sidebar menu title -> id matching) ----------------------
@@ -392,7 +510,7 @@ function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'workbench_session_delete',
-    description: 'Permanently delete one session of this workbench: stops the agent if it is running (cancel + quiescence), then removes its persisted log, projection-cache row and workspace accounting. After deletion the client reloads; the edit-mode caller should verify with workbench_status or the session list.',
+    description: 'Permanently delete one session of this workbench: stops the agent if it is running (cancel + quiescence), then removes its persisted log, projection-cache row and workspace accounting. Also auto-deletes the files newly produced during that session (the session upload dir <.dsh-uploads/<sessionId>> and workspace files created after the session baseline snapshot; pre-existing files the session modified are kept). After deletion the client reloads; the edit-mode caller should verify with workbench_status or the session list.',
     parameters: {
       sessionId: {
         type: 'string',
@@ -408,17 +526,38 @@ function apply(ctx) {
       const sessionId = String(args.sessionId || '').trim()
       try {
         const result = await deleteSessionCore(ctx, sessionId)
-        return [
+        const lines = [
           `deleted: ${sessionId}`,
           `log dir removed: ${result.dirRemoved}`,
           `projection row removed: ${result.projRemoved}`,
           `workspace accounting removed: ${result.workspaceRemoved}`,
-        ].join('\n')
+          `session files removed: ${result.files.removed} files (${result.files.bytes} bytes) across ${result.files.targets} workspace(s)`,
+          `session upload dirs removed: ${result.files.uploadDirsRemoved}`,
+          `file removal failures: ${result.files.failed}`,
+          `pre-existing files modified by the session kept: ${result.files.modifiedCount}`,
+        ]
+        if (result.files.failures && result.files.failures.length > 0) {
+          lines.push(`failures: ${result.files.failures.slice(0, 5).join('; ')}`)
+        }
+        return lines.join('\n')
       } catch (e) {
         return `delete failed: ${e.message}`
       }
     },
   }))
+
+  // Snapshot every new session's workspace into its baseline ledger so a
+  // later delete can identify (and remove) the files the session produced.
+  // Fail-soft: without a ledger the delete falls back to birth-time heuristics.
+  if (typeof ctx.on === 'function') {
+    ctx.on('session/created', (session) => {
+      snapshotSessionArtifacts(ctx, session).catch((e) => {
+        if (ctx.logger && typeof ctx.logger.warn === 'function') {
+          ctx.logger.warn(`session-delete: file ledger snapshot failed: ${e && e.message ? e.message : String(e)}`)
+        }
+      })
+    })
+  }
 }
 
 export { apply, inject, name }
