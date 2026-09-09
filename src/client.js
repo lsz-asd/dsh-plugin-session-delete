@@ -9,6 +9,10 @@
 // switches the conversation. The dialog shows the session name + id and a
 // running warning; deleting a running session stops it on the host first
 // (agent.cancel + quiescence) — the delete itself is always allowed.
+// After the session is deleted, the files it produced are LISTED as a
+// checkable list (everything pre-checked); only the user-confirmed
+// selection is removed via /__chameleon/session/files/apply — keeping
+// everything is a valid choice.
 //
 // Locale: all copy lives in the zh/en dictionaries below and follows the
 // client's active language through the `locale` service (t seat for slot
@@ -55,13 +59,23 @@ window.__ModuleLoader__.load({
       'dialog.runningWarn': '⚠ 会话正在运行',
       'dialog.ack': '我已了解后果，确认删除',
       'dialog.notFoundDesc': '未能在会话列表中找到该会话（可能已被删除或列表尚未刷新），请刷新后重试。',
-      'dialog.runningDesc': '该会话正在运行，删除会立即停止其任务并永久删除，正在进行的操作将中断且无法恢复。删除将同时清理该会话期间新产生的所有文件：会话上传目录与工作区内会话新建的文件（会话修改过的既有文件会保留）。',
-      'dialog.deleteDesc': '将永久删除该会话及其全部对话记录（会话日志、统计与工作区记账），并自动删除该会话期间新产生的所有文件：会话上传目录（.dsh-uploads/<会话ID>）与工作区内会话新建的文件；会话修改过的既有文件会保留。此操作不可恢复。',
+      'dialog.runningDesc': '该会话正在运行，删除会立即停止其任务并永久删除，正在进行的操作将中断且无法恢复。删除会话后会列出该会话期间新产生的文件（会话上传目录与工作区内新建的文件），可全部删除、按需删除或全部保留；会话修改过的既有文件默认保留。',
+      'dialog.deleteDesc': '将永久删除该会话及其全部对话记录（会话日志、统计与工作区记账）。删除会话后会列出该会话期间新产生的文件（会话上传目录 .dsh-uploads/<会话ID> 与工作区内新建的文件），可全部删除、按需删除或全部保留；会话修改过的既有文件默认保留。此操作不可恢复。',
+      'dialog.selectTitle': '清理会话文件',
+      'dialog.selectDesc': '会话已删除。以下是该会话期间新产生的文件，请勾选需要删除的项（未勾选的将保留）：',
+      'dialog.selectAll': '全选',
+      'dialog.selectNone': '全不选',
+      'dialog.deleteSelected': '删除所选（{0}）',
+      'dialog.keepAll': '全部保留',
+      'dialog.uploadDir': '上传目录',
+      'dialog.modifiedHint': '另有 {0} 个会话修改过的既有文件，默认保留',
+      'dialog.applying': '正在删除文件…',
+      'dialog.selectedStats': '已选 {0} / {1} 项（{2}）',
       'dialog.summary.removed': '已删除会话期间新产生的文件 {0} 个（共 {1}）',
       'dialog.summary.uploads': '已清理会话上传目录 {0} 个',
       'dialog.summary.kept': '会话修改过的既有文件已保留 {0} 个',
       'dialog.summary.failed': '{0} 个文件删除失败（运行中的程序可能占用）',
-      'dialog.summary.none': '该会话没有产生需要清理的文件',
+      'dialog.summary.none': '没有文件被删除',
       'button.title': '删除会话',
       'button.titleRunning': '删除会话（运行中，删除将停止任务）',
       'menu.delete': '删除会话',
@@ -81,13 +95,23 @@ window.__ModuleLoader__.load({
       'dialog.runningWarn': '⚠ Session is running',
       'dialog.ack': 'I understand the consequences. Confirm deletion',
       'dialog.notFoundDesc': 'Could not find this session in the session list (it may have been deleted or the list has not refreshed yet). Please refresh and try again.',
-      'dialog.runningDesc': 'This session is running. Deleting it will stop its task immediately and remove it permanently; any work in progress will be interrupted and cannot be recovered. All files newly produced during the session are removed as well: the session upload directory and files the session created in the workspace (pre-existing files the session modified are kept).',
-      'dialog.deleteDesc': 'This will permanently delete the session and all of its conversation records (session log, statistics and workspace accounting), and automatically remove all files newly produced during the session: the session upload directory (.dsh-uploads/<sessionId>) and files the session created in the workspace; pre-existing files the session modified are kept. This action cannot be undone.',
+      'dialog.runningDesc': 'This session is running. Deleting it will stop its task immediately and remove it permanently; any work in progress will be interrupted and cannot be recovered. After the session is deleted, the files it produced (the session upload directory and files it created in the workspace) are listed for you to remove — all, some, or none; pre-existing files the session modified are kept.',
+      'dialog.deleteDesc': 'This will permanently delete the session and all of its conversation records (session log, statistics and workspace accounting). After the session is deleted, the files it produced (the session upload directory .dsh-uploads/<sessionId> and files it created in the workspace) are listed for you to remove — all, some, or none; pre-existing files the session modified are kept. This action cannot be undone.',
+      'dialog.selectTitle': 'Clean up session files',
+      'dialog.selectDesc': 'The session has been deleted. These files were produced during the session — check the ones to remove (unchecked items are kept):',
+      'dialog.selectAll': 'Select all',
+      'dialog.selectNone': 'Select none',
+      'dialog.deleteSelected': 'Delete selected ({0})',
+      'dialog.keepAll': 'Keep all',
+      'dialog.uploadDir': 'upload dir',
+      'dialog.modifiedHint': '{0} pre-existing file(s) the session modified are kept',
+      'dialog.applying': 'Deleting files…',
+      'dialog.selectedStats': '{0} / {1} selected ({2})',
       'dialog.summary.removed': 'Removed {0} file(s) created during the session ({1} in total)',
       'dialog.summary.uploads': 'Removed {0} session upload directory (directories)',
       'dialog.summary.kept': 'Kept {0} pre-existing file(s) that the session modified',
       'dialog.summary.failed': '{0} file(s) could not be removed (possibly locked by a running program)',
-      'dialog.summary.none': 'No session-produced files needed cleaning up',
+      'dialog.summary.none': 'No files were deleted',
       'button.title': 'Delete session',
       'button.titleRunning': 'Delete session (running — deleting will stop the task)',
       'menu.delete': 'Delete session',
@@ -167,6 +191,75 @@ window.__ModuleLoader__.load({
       color: '#fff',
       fontSize: 13,
       cursor: 'pointer',
+    }
+
+    // --- file-selection screen (post-delete, pre-removal) ----------------------
+
+    const listToolbarStyle = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      margin: '2px 0 6px',
+      fontSize: 12,
+      lineHeight: '16px',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+    }
+
+    const miniBtnStyle = {
+      padding: '1px 8px',
+      borderRadius: 6,
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+      fontSize: 12,
+      lineHeight: '18px',
+      cursor: 'pointer',
+    }
+
+    const listStyle = {
+      maxHeight: 280,
+      overflowY: 'auto',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+      borderRadius: 8,
+      padding: '4px 0',
+    }
+
+    const rowStyle = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '4px 12px',
+      fontSize: 13,
+      lineHeight: '20px',
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      cursor: 'pointer',
+      userSelect: 'none',
+    }
+
+    const relStyle = {
+      flex: '1 1 auto',
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      fontFamily: 'var(--dsw-alias-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)',
+      fontSize: 12,
+    }
+
+    const badgeStyle = {
+      flex: 'none',
+      fontSize: 11,
+      lineHeight: '16px',
+      padding: '0 6px',
+      borderRadius: 4,
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+    }
+
+    const sizeStyle = {
+      flex: 'none',
+      fontSize: 12,
+      color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
     }
 
     // --- shared delete dialog (root overlay) -----------------------------------
@@ -388,15 +481,26 @@ window.__ModuleLoader__.load({
             if (!res.ok || !data.ok) {
               throw new Error(data.error || `delete failed (HTTP ${res.status})`)
             }
-            // Deleted. Switch to the done screen (shows what was cleaned
-            // up), refresh the sidebar list in place — NO page reload — and
-            // if the current session was deleted, open the first remaining
-            // session so the user can keep working.
+            // Deleted. Refresh the sidebar list in place — NO page reload —
+            // and if the current session was deleted, open the first
+            // remaining session so the user can keep working.
             const svc = __sessionsSvc
             const deletedCurrent = svc && svc.list
               ? svc.list.getSnapshot().current === target.sessionId
               : false
-            setTarget((prev) => (prev ? { ...prev, done: data.files || null } : prev))
+            if (data.filesPending && Array.isArray(data.filesPending.items) && data.filesPending.items.length > 0) {
+              // Interactive file cleanup: nothing is deleted yet. Show the
+              // produced-file list; everything starts CHECKED so a single
+              // confirm removes all (the old auto-delete behavior), and
+              // deselecting keeps files.
+              const selected = {}
+              for (const it of data.filesPending.items) selected[it.key] = true
+              setTarget((prev) => (prev ? { ...prev, pending: data.filesPending, selected } : prev))
+            } else {
+              // Nothing produced (or the pending record could not be
+              // persisted): straight to the summary screen.
+              setTarget((prev) => (prev ? { ...prev, pending: null, selected: null, done: data.files || null } : prev))
+            }
             setBusy(false)
             if (svc && typeof svc.refreshList === 'function') {
               const done = svc.refreshList()
@@ -417,11 +521,72 @@ window.__ModuleLoader__.load({
           })
       }, [busy, acknowledged, target])
 
+      // Phase 2: run the confirmed selection against the host (or keep
+      // everything when `keepAll` is true — still clears the pending
+      // record server-side).
+      const applyFiles = useCallback((keepAll) => {
+        if (busy || !target || !target.pending) return
+        setBusy(true)
+        setError(null)
+        const keys = keepAll
+          ? []
+          : target.pending.items
+              .filter((it) => target.selected && target.selected[it.key])
+              .map((it) => it.key)
+        fetch('/__chameleon/session/files/apply', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: target.sessionId, selected: keys }),
+        })
+          .then(async (res) => {
+            let data = {}
+            try { data = await res.json() } catch { /* keep {} */ }
+            if (res.status === 404) {
+              // No pending record: already applied elsewhere (another tab,
+              // or the record was swept). Nothing left to confirm.
+              return { files: null }
+            }
+            if (!res.ok || !data.ok) {
+              throw new Error(data.error || `file cleanup failed (HTTP ${res.status})`)
+            }
+            return { files: data.files || null }
+          })
+          .then((out) => {
+            setTarget((prev) => (prev ? { ...prev, pending: null, selected: null, done: out.files } : prev))
+            setBusy(false)
+          })
+          .catch((reason) => {
+            setBusy(false)
+            setError(reason && reason.message ? reason.message : String(reason))
+          })
+      }, [busy, target])
+
+      const toggleItem = useCallback((key) => {
+        setTarget((prev) => {
+          if (!prev || !prev.selected) return prev
+          const next = { ...prev.selected }
+          if (next[key]) delete next[key]
+          else next[key] = true
+          return { ...prev, selected: next }
+        })
+      }, [])
+
+      const setAllItems = useCallback((v) => {
+        setTarget((prev) => {
+          if (!prev || !prev.pending) return prev
+          const next = {}
+          if (v) for (const it of prev.pending.items) next[it.key] = true
+          return { ...prev, selected: next }
+        })
+      }, [])
+
       if (!target) return null
 
       const done = target.done !== undefined
+      const pending = !done && target.pending &&
+        Array.isArray(target.pending.items) && target.pending.items.length > 0
       const name = target.notFound ? target.title || t('dialog.untitled') : (target.title || t('dialog.untitled'))
-      const description = done
+      const description = done || pending
         ? null
         : target.notFound
           ? t('dialog.notFoundDesc')
@@ -454,6 +619,88 @@ window.__ModuleLoader__.load({
                   t('dialog.sessionId'), target.sessionId)
               : null),
           renderSummaryBlocks(target.done, t),
+        ])
+      }
+
+      // File-selection screen: the session is already deleted; the user now
+      // picks which of the produced files to remove. Nothing has been
+      // deleted yet — the removal runs on confirm.
+      if (pending) {
+        const items = target.pending.items
+        const selectedMap = target.selected || {}
+        const selectedItems = items.filter((it) => selectedMap[it.key])
+        const selectedBytes = selectedItems.reduce((acc, it) => acc + (Number(it.size) || 0), 0)
+        const multiWorkspace = new Set(items.map((it) => it.workspacePath)).size > 1
+        const allSelected = selectedItems.length === items.length
+        const wsLabel = (wsPath) => {
+          const parts = String(wsPath || '').split(/[\\/]/).filter(Boolean)
+          return parts.length > 0 ? parts[parts.length - 1] : ''
+        }
+
+        return React.createElement(Modal, {
+          open: true,
+          onClose: close,
+          title: t('dialog.selectTitle'),
+          closeLabel: t('dialog.cancel'),
+          description: t('dialog.selectDesc'),
+          footer: [
+            React.createElement('button', {
+              key: 'keepAll',
+              type: 'button',
+              disabled: busy,
+              onClick: () => applyFiles(true),
+              style: { ...cancelBtnStyle, ...(busy ? { opacity: 0.5, cursor: 'default' } : {}) },
+            }, t('dialog.keepAll')),
+            React.createElement('button', {
+              key: 'apply',
+              type: 'button',
+              disabled: busy || selectedItems.length === 0,
+              onClick: () => applyFiles(false),
+              style: { ...dangerBtnStyle, ...(busy || selectedItems.length === 0 ? { opacity: 0.5, cursor: 'default' } : {}) },
+            }, busy ? t('dialog.applying') : fmt(t('dialog.deleteSelected'), selectedItems.length)),
+          ],
+        }, [
+          React.createElement('div', { key: 'meta', style: metaStyle },
+            t('dialog.session'), name,
+            target.sessionId
+              ? React.createElement(React.Fragment, null,
+                  React.createElement('br'),
+                  t('dialog.sessionId'), target.sessionId)
+              : null),
+          React.createElement('div', { key: 'toolbar', style: listToolbarStyle },
+            React.createElement('button', {
+              type: 'button',
+              disabled: busy,
+              onClick: () => setAllItems(!allSelected),
+              style: { ...miniBtnStyle, ...(busy ? { opacity: 0.5, cursor: 'default' } : {}) },
+            }, allSelected ? t('dialog.selectNone') : t('dialog.selectAll')),
+            fmt(t('dialog.selectedStats'), selectedItems.length, items.length, fmtBytes(selectedBytes))),
+          React.createElement('div', { key: 'list', style: listStyle },
+            items.map((it) => React.createElement('label', {
+              key: it.key,
+              style: rowStyle,
+              title: it.abs || it.rel,
+            },
+              React.createElement('input', {
+                type: 'checkbox',
+                checked: !!selectedMap[it.key],
+                disabled: busy,
+                onChange: () => toggleItem(it.key),
+              }),
+              React.createElement('span', { style: relStyle },
+                multiWorkspace && it.workspacePath
+                  ? `${wsLabel(it.workspacePath)}/${it.rel}`
+                  : it.rel),
+              it.kind === 'uploadDir'
+                ? React.createElement('span', { key: 'badge', style: badgeStyle }, t('dialog.uploadDir'))
+                : null,
+              React.createElement('span', { style: sizeStyle }, fmtBytes(Number(it.size) || 0))))),
+          target.pending.modifiedCount > 0
+            ? React.createElement('div', { key: 'mod', style: statusStyle },
+                fmt(t('dialog.modifiedHint'), target.pending.modifiedCount))
+            : null,
+          busy ? React.createElement('div', { key: 'busy', style: statusStyle }, t('dialog.applying')) : null,
+          error ? React.createElement('div', { key: 'err', style: errStyle, role: 'alert' }, error) : null,
         ])
       }
 

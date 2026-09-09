@@ -7,12 +7,18 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
+  applyPendingSelection,
   cleanupSessionFiles,
   ledgerPathFor,
+  pendingPathFor,
+  previewSessionWorkspaces,
   rawSessionId,
   readLedger,
+  readPending,
+  removeLedger,
   snapshotWorkspace,
   writeLedger,
+  writePending,
 } from '../src/session-files.js'
 
 const OLD_MTIME = new Date('2020-01-01T00:00:00Z')
@@ -309,4 +315,126 @@ test('missing workspace: nothing happens, ledger still removed', async () => {
   })
   assert.equal(report.mode, 'none')
   assert.equal(report.removed, 0)
+})
+
+// --- interactive flow: preview -> pending record -> confirmed apply ----------
+
+test('preview lists produced files without deleting; apply removes only the confirmed subset', async () => {
+  const home = tmpRoot()
+  const ws = path.join(home, 'ws')
+  const id = sid()
+  process.env.DSH_HOME = home
+  try {
+    // Pre-existing baseline.
+    w(path.join(ws, 'old.txt'), 'old')
+    w(path.join(ws, 'keep.txt'), 'keep')
+    age(path.join(ws, 'old.txt'))
+    age(path.join(ws, 'keep.txt'))
+    const snap = await snapshotWorkspace(ws)
+    assert.ok(await writeLedger(id, { workspacePath: ws, createdAt: Date.now() }, snap))
+
+    // What the session "produces".
+    w(path.join(ws, 'new1.txt'), 'n1')
+    w(path.join(ws, 'newdir', 'a.txt'), 'na')
+    w(path.join(ws, 'newdir', 'sub', 'b.txt'), 'nb')
+    w(path.join(ws, 'newdir2', 'c.txt'), 'nc')
+    const uploadRaw = path.join(ws, '.dsh-uploads', id)
+    w(path.join(uploadRaw, 'doc.bin'), 'bin')
+
+    // Phase 1: preview deletes nothing and keeps the ledger.
+    const preview = await previewSessionWorkspaces({
+      sessionId: id,
+      targets: [{ workspacePath: ws, ledger: readLedger(id), uploadDirs: [uploadRaw] }],
+      createdAt: Date.now(),
+    })
+    assert.equal(preview.mode, 'ledger')
+    assert.equal(preview.items.length, 5) // upload dir + 4 new files
+    assert.ok(preview.items.some((it) => it.kind === 'uploadDir' && it.rel === `.dsh-uploads/${id}`))
+    assert.ok(preview.items.every((it) => typeof it.key === 'string' && it.key.length > 0))
+    assert.equal(exists(path.join(ws, 'new1.txt')), true, 'preview removed nothing')
+    assert.equal(exists(uploadRaw), true)
+    assert.ok(readLedger(id), 'ledger survives the preview')
+    assert.equal(preview.modifiedCount, 0)
+
+    // Freeze the pending record (deleteSessionCore does this + ledger drop).
+    assert.ok(writePending(id, preview))
+    assert.ok(readPending(id))
+    removeLedger(id)
+    assert.equal(readLedger(id), null, 'the frozen record supersedes the ledger')
+
+    // Phase 2: user confirms a subset — upload dir + new1.txt + newdir/a.txt.
+    const confirmed = preview.items
+      .filter((it) => it.kind === 'uploadDir' || it.rel === 'new1.txt' || it.rel === 'newdir/a.txt')
+      .map((it) => it.key)
+    const report = await applyPendingSelection(id, confirmed)
+
+    assert.equal(report.uploadDirsRemoved, 1)
+    assert.equal(report.removed, 2)
+    assert.equal(report.failed, 0)
+    assert.equal(exists(path.join(ws, 'new1.txt')), false)
+    assert.equal(exists(path.join(ws, 'newdir', 'a.txt')), false)
+    assert.equal(exists(uploadRaw), false)
+    // Unselected items are kept...
+    assert.equal(exists(path.join(ws, 'newdir', 'sub', 'b.txt')), true)
+    assert.equal(exists(path.join(ws, 'newdir2', 'c.txt')), true)
+    assert.equal(exists(path.join(ws, 'old.txt')), true)
+    assert.equal(exists(path.join(ws, 'keep.txt')), true)
+    // ...and directories still holding kept files are not pruned.
+    assert.equal(exists(path.join(ws, 'newdir')), true)
+    assert.equal(exists(path.join(ws, 'newdir2')), true)
+    assert.equal(report.prunedDirs, 0)
+    if (exists(path.join(ws, '.dsh-uploads'))) {
+      assert.equal(fs.readdirSync(path.join(ws, '.dsh-uploads')).length, 0)
+    }
+    // The pending record is consumed; a second apply is a no-op.
+    assert.equal(exists(pendingPathFor(id)), false)
+    assert.equal(await applyPendingSelection(id, confirmed), null)
+  } finally {
+    delete process.env.DSH_HOME
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('apply with keep-all removes nothing but clears the pending record', async () => {
+  const home = tmpRoot()
+  const ws = path.join(home, 'ws')
+  const id = sid()
+  process.env.DSH_HOME = home
+  try {
+    const uploadRaw = path.join(ws, '.dsh-uploads', id)
+    w(path.join(uploadRaw, 'doc.bin'), 'bin')
+    w(path.join(ws, 'new1.txt'), 'n1')
+
+    const preview = await previewSessionWorkspaces({
+      sessionId: id,
+      targets: [{ workspacePath: ws, ledger: null, createdAt: null, uploadDirs: [uploadRaw] }],
+      createdAt: null,
+    })
+    assert.equal(preview.mode, 'uploads')
+    assert.equal(preview.items.length, 1)
+    assert.ok(writePending(id, preview))
+
+    const report = await applyPendingSelection(id, [])
+    assert.equal(report.removed, 0)
+    assert.equal(report.uploadDirsRemoved, 0)
+    assert.equal(report.failed, 0)
+    assert.equal(exists(uploadRaw), true, 'nothing is removed without confirmation')
+    assert.equal(exists(path.join(ws, 'new1.txt')), true)
+    assert.equal(exists(pendingPathFor(id)), false, 'record cleared so it cannot linger')
+  } finally {
+    delete process.env.DSH_HOME
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('apply without a pending record returns null; session- prefixed ids resolve', async () => {
+  const home = tmpRoot()
+  const id = sid()
+  process.env.DSH_HOME = home
+  try {
+    assert.equal(await applyPendingSelection(`session-${id}`, []), null)
+  } finally {
+    delete process.env.DSH_HOME
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 })

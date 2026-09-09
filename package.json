@@ -1,7 +1,7 @@
 {
   "name": "@huanlin/dsh-plugin-session-delete",
-  "version": "0.4.0",
-  "description": "Delete sessions of a DeepSeek Harness profile from the UI: header danger button + session-row menu item with a risk-consent dialog; host endpoint + tool delete the log, projection cache and workspace accounting, and auto-delete every file newly produced during the session (session upload dir + workspace files created after the session baseline snapshot; pre-existing modified files are kept). Works in web and the desktop client alike.",
+  "version": "0.5.0",
+  "description": "Delete sessions of a DeepSeek Harness profile from the UI: header danger button + session-row menu item with a risk-consent dialog; host endpoint + tool delete the log, projection cache and workspace accounting. Files newly produced during the session (session upload dir + workspace files created after the session baseline snapshot; pre-existing modified files are kept) are then listed for confirmation in the UI and removed per the user's selection (the agent tool deletes them automatically). Works in web and the desktop client alike.",
   "type": "module",
   "license": "MIT",
   "publishConfig": {

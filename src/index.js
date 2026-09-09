@@ -13,10 +13,16 @@
 //      spellings (raw uuid and `session-` prefixed);
 //   4. drop the projection-cache row (storageDomain 'session_projcache',
 //      table 'sessions');
-//   5. auto-delete the files the session newly produced — its upload dir
+//   5. handle the files the session newly produced — its upload dir
 //      (<cwd>/.dsh-uploads/<sessionId>/) plus workspace files created after
 //      the session baseline ledger snapshot (birth-time fallback when no
-//      ledger exists); pre-existing files the session modified are kept;
+//      ledger exists); pre-existing files the session modified are always
+//      kept. Two modes:
+//        - HTTP (interactive): the produced-file list is frozen into a
+//          pending record and returned; NOTHING is deleted until the user
+//          confirms a selection via POST /__chameleon/session/files/apply.
+//        - tool (automatic): the cleanup runs immediately in full — an
+//          agent has no dialog to confirm with;
 //   6. only after the log is confirmed gone, remove the workspace accounting
 //      (domain 'workspace': sessionIds arrays + global.archivedSessionIds).
 //
@@ -30,10 +36,15 @@ import path from 'node:path'
 import os from 'node:os'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
+  applyPendingSelection,
   cleanupSessionWorkspaces,
+  previewSessionWorkspaces,
   readLedger,
+  removeLedger,
   snapshotWorkspace,
+  sweepStalePending,
   writeLedger,
+  writePending,
 } from './session-files.js'
 
 const name = 'chameleon-session-delete'
@@ -322,7 +333,7 @@ function detachLiveSession(ctx, sessionId) {
   return detached
 }
 
-async function deleteSessionCore(ctx, sessionId) {
+async function deleteSessionCore(ctx, sessionId, { fileMode = 'auto' } = {}) {
   if (!SESSION_ID_RE.test(sessionId)) {
     throw new DeleteError(`invalid session id: ${sessionId}`, 400)
   }
@@ -352,11 +363,10 @@ async function deleteSessionCore(ctx, sessionId) {
     throw new DeleteError(`session files could not be fully removed: ${remainingDirs.join(', ')}`, 500)
   }
 
-  // Auto-delete the files the session produced: its upload dirs
-  // (<cwd>/.dsh-uploads/<sessionId>/) always; workspace files created during
-  // the session per the baseline ledger (or birth-time fallback). Best-effort
-  // by design: a locked file must not block the session deletion, and every
-  // failure is reported in the result.
+  // Handle the files the session produced. Targets: every workspace the
+  // session is registered in (either id spelling) plus the ledger's own
+  // workspace path (the session may have been detached from accounting
+  // already).
   const ledger = readLedger(sessionId)
   const wsPaths = await findSessionWorkspaces(ctx, sessionId)
   const targetSet = new Set()
@@ -371,7 +381,36 @@ async function deleteSessionCore(ctx, sessionId) {
       uploadDirs: variants.map((v) => path.join(wsPath, '.dsh-uploads', v)),
     })
   }
-  const files = await cleanupSessionWorkspaces({ sessionId, targets, createdAt })
+
+  let files = null
+  let filesPending = null
+  if (fileMode === 'list') {
+    // Interactive mode: freeze the produced-file list into a pending record
+    // and hand it to the client. NOTHING is deleted here — the removal runs
+    // only after the user confirms a selection via /files/apply (and "keep
+    // everything" is a valid outcome).
+    const preview = await previewSessionWorkspaces({ sessionId, targets, createdAt })
+    if (preview.items.length > 0) {
+      if (writePending(sessionId, preview)) {
+        filesPending = {
+          mode: preview.mode,
+          items: preview.items,
+          workspaces: preview.workspaces,
+          modifiedCount: preview.modifiedCount,
+          modifiedKept: preview.modifiedKept,
+        }
+      } else if (ctx.logger && typeof ctx.logger.warn === 'function') {
+        // Without the pending record no confirmation round-trip is possible:
+        // keep every file (safe side) and say so.
+        ctx.logger.warn(`session-delete: could not persist pending file list for ${sessionId}; session-produced files were kept`)
+      }
+    }
+    // The frozen pending record supersedes the ledger either way.
+    removeLedger(sessionId)
+  } else {
+    // Automatic mode (tool): delete everything the session produced now.
+    files = await cleanupSessionWorkspaces({ sessionId, targets, createdAt })
+  }
 
   // Only after the log is confirmed gone do we detach the session from its
   // workspace/archive accounting.
@@ -379,11 +418,13 @@ async function deleteSessionCore(ctx, sessionId) {
   const dirRemoved = firstDirRemoved || secondDirRemoved || thirdDirRemoved
   const projRemoved = projStorage.projRemoved || workspaceStorage.projRemoved
   const workspaceRemoved = workspaceStorage.workspaceRemoved
-  if (!dirRemoved && !projRemoved && !workspaceRemoved &&
-      files.removed === 0 && files.uploadDirsRemoved === 0 && files.failed === 0) {
+  const fileEvidence = files
+    ? files.removed > 0 || files.uploadDirsRemoved > 0 || files.failed > 0
+    : !!(filesPending && filesPending.items.length > 0)
+  if (!dirRemoved && !projRemoved && !workspaceRemoved && !fileEvidence) {
     throw new DeleteError(`session not found: ${sessionId}`, 404)
   }
-  return { stopped, detached, dirRemoved, projRemoved, workspaceRemoved, files }
+  return { stopped, detached, dirRemoved, projRemoved, workspaceRemoved, files, filesPending }
 }
 
 // --- session list (for sidebar menu title -> id matching) ----------------------
@@ -486,12 +527,59 @@ function apply(ctx) {
           sendJson(res, 400, { error: 'sessionId required' })
           return
         }
+        // Default is the interactive flow: the session is deleted, its
+        // produced files are LISTED for user confirmation, and the removal
+        // only runs on a later /files/apply call. `files: 'auto'` opts into
+        // the immediate full cleanup (no dialog in between).
+        const fileMode = args.files === 'auto' ? 'auto' : 'list'
         try {
-          const result = await deleteSessionCore(ctx, sessionId)
+          const result = await deleteSessionCore(ctx, sessionId, { fileMode })
           sendJson(res, 200, { ok: true, removed: [sessionId], ...result })
         } catch (e) {
           const status = e instanceof DeleteError && e.status ? e.status : 500
           sendJson(res, status, { error: e.message })
+        }
+      },
+    }))
+
+    // Phase 2 of the interactive file cleanup: run the user-confirmed
+    // selection against the pending record frozen at delete time. An empty
+    // selection is a valid "keep everything" answer and simply clears the
+    // record.
+    targetCtx.effect(() => host.register({
+      kind: 'exact',
+      path: '/__chameleon/session/files/apply',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        let args = {}
+        try {
+          const body = await readBody(req)
+          if (body) args = JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { error: 'bad json body' })
+          return
+        }
+        const sessionId = String(args.sessionId || '').trim()
+        if (!sessionId) {
+          sendJson(res, 400, { error: 'sessionId required' })
+          return
+        }
+        if (args.selected !== undefined && !Array.isArray(args.selected)) {
+          sendJson(res, 400, { error: 'selected must be an array of item keys' })
+          return
+        }
+        try {
+          const report = await applyPendingSelection(sessionId, args.selected)
+          if (!report) {
+            sendJson(res, 404, { error: `no pending file cleanup for session: ${sessionId}` })
+            return
+          }
+          sendJson(res, 200, { ok: true, files: report })
+        } catch (e) {
+          sendJson(res, 500, { error: e.message })
         }
       },
     }))
@@ -510,7 +598,7 @@ function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'workbench_session_delete',
-    description: 'Permanently delete one session of this workbench: stops the agent if it is running (cancel + quiescence), then removes its persisted log, projection-cache row and workspace accounting. Also auto-deletes the files newly produced during that session (the session upload dir <.dsh-uploads/<sessionId>> and workspace files created after the session baseline snapshot; pre-existing files the session modified are kept). After deletion the client reloads; the edit-mode caller should verify with workbench_status or the session list.',
+    description: 'Permanently delete one session of this workbench: stops the agent if it is running (cancel + quiescence), then removes its persisted log, projection-cache row and workspace accounting. The files newly produced during that session (the session upload dir <.dsh-uploads/<sessionId>> and workspace files created after the session baseline snapshot; pre-existing files the session modified are kept) are deleted immediately by this tool — the interactive client UI instead lists them for the user to confirm. After deletion the client reloads; the edit-mode caller should verify with workbench_status or the session list.',
     parameters: {
       sessionId: {
         type: 'string',
@@ -531,13 +619,17 @@ function apply(ctx) {
           `log dir removed: ${result.dirRemoved}`,
           `projection row removed: ${result.projRemoved}`,
           `workspace accounting removed: ${result.workspaceRemoved}`,
-          `session files removed: ${result.files.removed} files (${result.files.bytes} bytes) across ${result.files.targets} workspace(s)`,
-          `session upload dirs removed: ${result.files.uploadDirsRemoved}`,
-          `file removal failures: ${result.files.failed}`,
-          `pre-existing files modified by the session kept: ${result.files.modifiedCount}`,
         ]
-        if (result.files.failures && result.files.failures.length > 0) {
-          lines.push(`failures: ${result.files.failures.slice(0, 5).join('; ')}`)
+        if (result.files) {
+          lines.push(
+            `session files removed: ${result.files.removed} files (${result.files.bytes} bytes) across ${result.files.targets} workspace(s)`,
+            `session upload dirs removed: ${result.files.uploadDirsRemoved}`,
+            `file removal failures: ${result.files.failed}`,
+            `pre-existing files modified by the session kept: ${result.files.modifiedCount}`,
+          )
+          if (result.files.failures && result.files.failures.length > 0) {
+            lines.push(`failures: ${result.files.failures.slice(0, 5).join('; ')}`)
+          }
         }
         return lines.join('\n')
       } catch (e) {
@@ -547,7 +639,7 @@ function apply(ctx) {
   }))
 
   // Snapshot every new session's workspace into its baseline ledger so a
-  // later delete can identify (and remove) the files the session produced.
+  // later delete can identify (and list) the files the session produced.
   // Fail-soft: without a ledger the delete falls back to birth-time heuristics.
   if (typeof ctx.on === 'function') {
     ctx.on('session/created', (session) => {
@@ -558,6 +650,16 @@ function apply(ctx) {
       })
     })
   }
+
+  // Drop pending file-cleanup records that were never confirmed (30+ days):
+  // metadata only — the files themselves always stay (keeping them was a
+  // valid user choice). Fail-soft by construction.
+  try {
+    const swept = sweepStalePending()
+    if (swept > 0 && ctx.logger && typeof ctx.logger.info === 'function') {
+      ctx.logger.info(`session-delete: dropped ${swept} stale pending file-cleanup record(s)`)
+    }
+  } catch { /* never block startup */ }
 }
 
 export { apply, inject, name }
