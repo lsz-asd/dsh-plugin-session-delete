@@ -207,8 +207,13 @@ window.__ModuleLoader__.load({
 
     // Resolve the target session from the client's authoritative list store.
     // The sidebar dispatches by title only (its DOM carries no id); the
-    // header dispatches by id. Matching levels: exact -> fork-suffix-stripped
-    // -> contains. A failed store match falls back to the host list endpoint.
+    // header dispatches by id. Matching levels: exact -> fork-suffix-stripped.
+    // The substring (contains) level was removed (issue #2): with duplicate
+    // or substring-related titles it silently picked the first similar
+    // session, which could delete the wrong session. A match is only used
+    // when it is unique at its level; an ambiguous match returns null, so
+    // the caller shows the not-found dialog instead of deleting a guess.
+    // A failed store match falls back to the host list endpoint.
     function resolveTargetFromStore(detail) {
       let sessionId = detail.sessionId || null
       let title = detail.title || null
@@ -223,30 +228,20 @@ window.__ModuleLoader__.load({
           const snap = svc.list.getSnapshot()
           const byId = snap && snap.byId ? snap.byId : {}
           const ids = Object.keys(byId)
-          for (const id of ids) {
-            const s = byId[id]
-            if (s && normalizeTitle(s.title) === want) {
-              return { sessionId: id, title: s.title, running: s.running === true }
-            }
+          const exact = ids.filter((id) => byId[id] && normalizeTitle(byId[id].title) === want)
+          if (exact.length === 1) {
+            const s = byId[exact[0]]
+            return { sessionId: exact[0], title: s.title, running: s.running === true }
           }
+          if (exact.length > 1) return null
           if (wantBase) {
-            for (const id of ids) {
-              const s = byId[id]
-              if (s && stripForkSuffix(s.title) === wantBase) {
-                return { sessionId: id, title: s.title, running: s.running === true }
-              }
+            const stripped = ids.filter((id) => byId[id] && stripForkSuffix(byId[id].title) === wantBase)
+            if (stripped.length === 1) {
+              const s = byId[stripped[0]]
+              return { sessionId: stripped[0], title: s.title, running: s.running === true }
             }
+            if (stripped.length > 1) return null
           }
-          let best = null
-          for (const id of ids) {
-            const s = byId[id]
-            if (!s || !s.title) continue
-            const t = normalizeTitle(s.title)
-            if (t && (t.indexOf(want) >= 0 || want.indexOf(t) >= 0)) {
-              best = { sessionId: id, title: s.title, running: s.running === true }
-            }
-          }
-          if (best) return best
         } catch { /* ignore */ }
       }
       return null
@@ -282,14 +277,17 @@ window.__ModuleLoader__.load({
               let m = null
               if (data && data.ok && Array.isArray(data.sessions)) {
                 const wantBase = stripForkSuffix(want)
-                for (const s of data.sessions) {
-                  if (!s.title) continue
+                const matches = data.sessions.filter((s) => {
+                  if (!s.title) return false
                   const t = normalizeTitle(s.title)
-                  if (t === want || (wantBase && stripForkSuffix(t) === wantBase) || t.indexOf(want) >= 0 || want.indexOf(t) >= 0) {
-                    m = s
-                    break
-                  }
-                }
+                  return t === want || (wantBase && stripForkSuffix(t) === wantBase)
+                })
+                // Same rule as the store resolver (issue #2): only a unique
+                // match may be used. The old substring fallback picked the
+                // first similar session and could delete the wrong one, so
+                // it is removed; an ambiguous match falls through to the
+                // not-found dialog below.
+                if (matches.length === 1) m = matches[0]
               }
               if (m) {
                 setTarget({ sessionId: m.sessionId, title: m.title, running: m.running === true })
